@@ -177,9 +177,17 @@ async def main():
             m3u_lines.append(play_url)
         
     # 写入文件，交由 GitHub commit 归档
+    # 写入播放列表文件，交由 GitHub commit 归档
     with open("playlist.m3u", "w", encoding="utf-8") as f:
         f.write("\n".join(m3u_lines))
     print(f"🎉 playlist.m3u 编译完成！包含 {len(CHANNELS)} 个频道，每个频道各生成 {len(active_nodes)} 条冗余线路。")
+    
+    # 额外输出一个纯粹的 nodes.json 节点池文件，供本地部署的 SuperIPTV / NetTV 在国内网络环境下拉取并进行秒级高精度测活
+    import json
+    nodes_data = [{"url": item["url"], "isp": item["isp"]} for item in candidates[:30]]
+    with open("nodes.json", "w", encoding="utf-8") as f:
+        json.dump(nodes_data, f, ensure_ascii=False, indent=2)
+    print(f"✅ nodes.json 节点池文件写入完成！共收录 {len(nodes_data)} 个北京待测活节点。")
 
 if __name__ == "__main__":
     asyncio.run(main())

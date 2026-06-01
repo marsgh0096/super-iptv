@@ -3,66 +3,35 @@ import asyncio
 import httpx
 from typing import List, Dict, Optional
 
-# ================= 区域与频道多源配置区域 =================
-# 您可以根据需要随时启用/禁用或添加更多省市和运营商的组播源扫描配置
-REGIONS = {
-    "bj_unicom": {
-        "name": "北京联通",
-        "test_multicast": "239.3.1.150:8000",  # 用于测活的北京卫视组播地址
-        "queries": [
-            'app:"udpxy" && city:"Beijing" && isp:"China Unicom"',
-            'app:"udpxy" && subdivisions:"Beijing" && isp:"China Unicom"',
-            'app:"udpxy" && country:"CN" && isp:"China Unicom"',  # 宽泛搜索，靠测活自动过滤出实际可播放的节点
-        ],
-        "channels": {
-            "bjws": {"name": "北京卫视", "multicast": "239.3.1.150:8000"},
-            "btvwy": {"name": "BRTV 文艺", "multicast": "239.3.1.209:8000"},
-            "btvxw": {"name": "BRTV 新闻", "multicast": "239.3.1.151:8000"},
-            "kaku": {"name": "卡酷少儿", "multicast": "239.3.1.152:8000"},
-        }
-    },
-    "sc_telecom": {
-        "name": "四川电信",
-        "test_multicast": "239.93.1.18:5140",  # 用于测活的四川卫视组播地址
-        "queries": [
-            'app:"udpxy" && subdivisions:"Sichuan" && isp:"China Telecom"',
-            'app:"udpxy" && country:"CN" && isp:"China Telecom"',  # 宽泛搜索，靠测活自动筛选
-        ],
-        "channels": {
-            "scws": {"name": "四川卫视", "multicast": "239.93.1.18:5140"},
-            "scys": {"name": "四川影视", "multicast": "239.93.1.21:5140"},
-            "scxw": {"name": "四川新闻", "multicast": "239.93.1.23:5140"},
-        }
-    },
-    "gd_telecom": {
-        "name": "广东电信",
-        "test_multicast": "239.77.1.1:5146",  # 用于测活的广东卫视组播地址
-        "queries": [
-            'app:"udpxy" && subdivisions:"Guangdong" && isp:"China Telecom"',
-            'app:"udpxy" && country:"CN" && isp:"China Telecom"',  # 宽泛搜索，靠测活自动筛选
-        ],
-        "channels": {
-            "gdws": {"name": "广东卫视", "multicast": "239.77.1.1:5146"},
-            "gdzj": {"name": "广东珠江", "multicast": "239.77.1.2:5146"},
-            "gdgg": {"name": "广东公共", "multicast": "239.77.1.3:5146"},
-            "gdnews": {"name": "广东新闻", "multicast": "239.77.1.4:5146"},
-        }
-    }
+# ================= 配置区域 =================
+# 只针对北京地区，去除 ISP 限制以最大化获取候选，靠主动流测活自动筛选与标注运营商
+ZOOMEYE_QUERIES = [
+    'app:"udpxy" && city:"Beijing"',
+    'app:"udpxy" && subdivisions:"Beijing"',
+    'udpxy && city:"Beijing"',
+]
+
+TEST_MULTICAST = "239.3.1.150:8000"  # 北京卫视组播
+
+# 待测试的联通核心频道列表（组播 IP 映射）
+CHANNELS = {
+    "bjws": {"name": "北京卫视", "multicast": "239.3.1.150:8000"},
+    "btvwy": {"name": "BRTV 文艺", "multicast": "239.3.1.209:8000"},
+    "btvxw": {"name": "BRTV 新闻", "multicast": "239.3.1.151:8000"},
+    "kaku": {"name": "卡酷少儿", "multicast": "239.3.1.152:8000"},
 }
+# ============================================
 
-# 启用的区域列表，您可以自由添加或注释掉不想扫描的区域
-ACTIVE_REGIONS = ["bj_unicom", "sc_telecom", "gd_telecom"]
-# ==========================================================
-
-async def fetch_zoomeye_nodes(api_key: str, queries: List[str]) -> List[str]:
+async def fetch_zoomeye_nodes(api_key: str) -> List[Dict]:
     headers = {"API-KEY": api_key, "User-Agent": "ZoomEye-Python-SDK"}
     
-    for query in queries:
+    for query in ZOOMEYE_QUERIES:
         print(f"🔍 正在尝试 ZoomEye 查询: {query}")
-        nodes = []
+        candidates = []
         try:
             async with httpx.AsyncClient() as client:
-                url = "https://api.zoomeye.org/host/search"
+                # 国际化节点使用 api.zoomeye.ai，确保在 GitHub Actions (海外环境) 下免受地域 403 拦截
+                url = "https://api.zoomeye.ai/host/search"
                 resp = await client.get(
                     url, 
                     headers=headers, 
@@ -74,11 +43,16 @@ async def fetch_zoomeye_nodes(api_key: str, queries: List[str]) -> List[str]:
                     for match in matches:
                         ip = match.get("ip")
                         port = match.get("portinfo", {}).get("port")
+                        # 提取运营商信息
+                        isp = match.get("geoinfo", {}).get("isp", "未知运营商")
                         if ip and port:
-                            nodes.append(f"http://{ip}:{port}")
-                    if nodes:
-                        print(f"✅ 查询成功！获取到 {len(nodes)} 个候选节点。")
-                        return nodes
+                            candidates.append({
+                                "url": f"http://{ip}:{port}",
+                                "isp": isp
+                            })
+                    if candidates:
+                        print(f"✅ 查询成功！获取到 {len(candidates)} 个北京候选节点。")
+                        return candidates
                     else:
                         print("⚠️ 该查询未返回任何节点，尝试下一个候选查询...")
                 else:
@@ -86,22 +60,29 @@ async def fetch_zoomeye_nodes(api_key: str, queries: List[str]) -> List[str]:
         except Exception as e:
             print(f"获取 ZoomEye 数据出错: {e}")
             
+    print("❌ 所有候选 ZoomEye 查询均未获取到任何北京节点。")
     return []
 
-async def verify_node(node_url: str, test_multicast: str) -> Optional[Dict]:
+async def verify_node(candidate: Dict) -> Optional[Dict]:
+    node_url = candidate["url"]
+    isp = candidate["isp"]
     status_url = f"{node_url}/status/"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(status_url, headers=headers, timeout=2.0)
             if r.status_code == 200 and "udpxy status" in r.text.lower():
-                active = r.text.count("<td>[")  # 统计已有连接数
+                active = r.text.count("<td>[")  # 统计已有的活跃连接数
                 
-                # 用该区域的组播源地址测试连通性
-                stream_url = f"{node_url}/udp/{test_multicast}"
+                # 拿北京卫视组播测试该节点连通性
+                stream_url = f"{node_url}/udp/{TEST_MULTICAST}"
                 async with client.stream("GET", stream_url, headers=headers, timeout=2.5) as stream_resp:
                     if stream_resp.status_code == 200:
-                        return {"node": node_url, "connections": active}
+                        return {
+                            "node": node_url, 
+                            "connections": active, 
+                            "isp": isp
+                        }
     except Exception:
         pass
     return None
@@ -112,53 +93,40 @@ async def main():
         print("❌ 未检测到 ZOOMEYE_KEY 环境变量！")
         return
         
-    m3u_lines = ["#EXTM3U"]
-    any_success = False
-    
-    for r_id in ACTIVE_REGIONS:
-        if r_id not in REGIONS:
-            continue
-            
-        r_meta = REGIONS[r_id]
-        print(f"\n🚀 === 开始扫描区域: {r_meta['name']} ===")
-        
-        # 1. 抓取节点
-        raw_nodes = await fetch_zoomeye_nodes(api_key, r_meta["queries"])
-        if not raw_nodes:
-            print(f"⚠️ 区域 {r_meta['name']} 未发现任何候选节点，跳过。")
-            continue
-            
-        # 2. 并发测活
-        tasks = [verify_node(node, r_meta["test_multicast"]) for node in raw_nodes]
-        results = await asyncio.gather(*tasks)
-        healthy = [r for r in results if r is not None]
-        
-        if not healthy:
-            print(f"⚠️ 区域 {r_meta['name']} 没有找到任何健康的公网 udpxy 代理节点。")
-            continue
-            
-        # 按连接负载升序排序，选择最空闲的可用节点
-        healthy.sort(key=lambda x: x["connections"])
-        best_node = healthy[0]["node"]
-        print(f"🌟 区域 {r_meta['name']} 最空闲的健康节点: {best_node}，可用健康节点共 {len(healthy)} 个。")
-        
-        # 3. 编译该区域频道的播放流链接
-        for ch_id, ch_meta in r_meta["channels"].items():
-            play_url = f"{best_node}/udp/{ch_meta['multicast']}"
-            m3u_lines.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="" group-title="{r_meta["name"]}专网台",{ch_meta["name"]}')
-            m3u_lines.append(play_url)
-            
-        any_success = True
-        
-    if not any_success:
-        print("\n❌ 遗憾：所有区域均未能扫描到任何健康节点，不更新 playlist.m3u 文件！")
+    # 1. 抓取节点
+    candidates = await fetch_zoomeye_nodes(api_key)
+    if not candidates:
+        print("未发现任何候选节点。")
         return
+        
+    # 2. 并发测活
+    tasks = [verify_node(cand) for cand in candidates]
+    results = await asyncio.gather(*tasks)
+    healthy = [r for r in results if r is not None]
+    
+    if not healthy:
+        print("没有找到任何可通过北京卫视组播流验证的健康公网节点。")
+        return
+        
+    # 按连接负载升序排序
+    healthy.sort(key=lambda x: x["connections"])
+    best_node = healthy[0]["node"]
+    best_isp = healthy[0]["isp"]
+    print(f"🌟 本轮最空闲的健康节点: {best_node}，运营商: {best_isp}，可用健康节点共 {len(healthy)} 个。")
+    
+    # 3. 编译并输出为标准的播放列表文件 playlist.m3u
+    m3u_lines = ["#EXTM3U"]
+    for ch_id, ch_meta in CHANNELS.items():
+        # 拼接出直连最优节点的 M3U 单播流链接
+        play_url = f"{best_node}/udp/{ch_meta['multicast']}"
+        # 在分组名和频道名中动态标注出具体的运营商
+        m3u_lines.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="" group-title="北京专网台 ({best_isp})",{ch_meta["name"]} ({best_isp})')
+        m3u_lines.append(play_url)
         
     # 写入文件，交由 GitHub commit 归档
     with open("playlist.m3u", "w", encoding="utf-8") as f:
         f.write("\n".join(m3u_lines))
-        
-    print("\n🎉 全局 playlist.m3u 编译并写入完成！")
+    print("✅ playlist.m3u 编译并写入完成！")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -3,7 +3,7 @@ name: 自动更新北京联通 IPTV 单播地址池
 on:
   schedule:
     # 每 2 小时自动运行一次
-    - cron: '0 */2 * * *'
+   # - cron: '0 */2 * * *'
   workflow_dispatch: # 支持手动触发
 
 jobs:

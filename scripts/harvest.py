@@ -5,7 +5,14 @@ import re
 from typing import List, Dict, Optional
 
 # ================= 配置区域 =================
-ZOOMEYE_QUERY = 'app:"udpxy" +city:"Beijing" +org:"China Unicom Beijing"'
+# 待测试的 ZoomEye 查询条件列表，从具体到宽泛尝试，避免因地理信息或 ISP 字段写法不一致导致 0 结果
+ZOOMEYE_QUERIES = [
+    'app:"udpxy" && city:"Beijing" && isp:"China Unicom"',
+    'app:"udpxy" && subdivisions:"Beijing" && isp:"China Unicom"',
+    'app:"udpxy" && city:"Beijing"',
+    'app:"udpxy" && subdivisions:"Beijing"',
+    'udpxy +city:"Beijing"',
+]
 TEST_MULTICAST = "239.3.1.150:8000"  # 北京卫视组播
 
 # 待测试的联通核心频道列表（组播 IP 映射）
@@ -18,22 +25,40 @@ CHANNELS = {
 # ============================================
 
 async def fetch_zoomeye_nodes(api_key: str) -> List[str]:
-    url = f"https://api.zoomeye.org/host/search?query={ZOOMEYE_QUERY}&page=1"
     headers = {"API-KEY": api_key, "User-Agent": "ZoomEye-Python-SDK"}
-    nodes = []
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, timeout=10.0)
-            if resp.status_code == 200:
-                matches = resp.json().get("matches", [])
-                for match in matches:
-                    ip = match.get("ip")
-                    port = match.get("portinfo", {}).get("port")
-                    if ip and port:
-                        nodes.append(f"http://{ip}:{port}")
-    except Exception as e:
-        print(f"获取 ZoomEye 数据出错: {e}")
-    return nodes
+    
+    for query in ZOOMEYE_QUERIES:
+        print(f"🔍 正在尝试 ZoomEye 查询: {query}")
+        nodes = []
+        try:
+            async with httpx.AsyncClient() as client:
+                # 使用 params 传参，httpx 会自动对 query 进行标准 URL 编码，避免特殊字符和空格导致的解析失败
+                url = "https://api.zoomeye.org/host/search"
+                resp = await client.get(
+                    url, 
+                    headers=headers, 
+                    params={"query": query, "page": 1}, 
+                    timeout=10.0
+                )
+                if resp.status_code == 200:
+                    matches = resp.json().get("matches", [])
+                    for match in matches:
+                        ip = match.get("ip")
+                        port = match.get("portinfo", {}).get("port")
+                        if ip and port:
+                            nodes.append(f"http://{ip}:{port}")
+                    if nodes:
+                        print(f"✅ 查询成功！成功获取到 {len(nodes)} 个候选节点。")
+                        return nodes
+                    else:
+                        print("⚠️ 该查询未返回任何节点，尝试下一个候选查询...")
+                else:
+                    print(f"⚠️ ZoomEye API 返回状态码 {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"获取 ZoomEye 数据出错: {e}")
+            
+    print("❌ 所有候选 ZoomEye 查询均未获取到任何节点。")
+    return []
 
 async def verify_node(node_url: str) -> Optional[Dict]:
     status_url = f"{node_url}/status/"

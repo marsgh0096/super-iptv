@@ -23,9 +23,11 @@ jobs:
       run: |
         pip install httpx
 
-    - name: 执行 ZoomEye 探测与过滤脚本
+    - name: 执行测活与过滤脚本
       env:
         ZOOMEYE_KEY: ${{ secrets.ZOOMEYE_KEY }}
+        FOFA_KEY: ${{ secrets.FOFA_KEY }}
+        HUNTER_KEY: ${{ secrets.HUNTER_KEY }}
       run: |
         python scripts/harvest.py
 

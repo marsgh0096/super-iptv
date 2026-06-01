@@ -2,11 +2,13 @@ import os
 import asyncio
 import httpx
 import base64
+import datetime
 from typing import List, Dict, Optional
 
 # ================= 配置区域 =================
-# 针对北京地区，通过奇安信鹰图进行宽泛搜索，靠主动流测活自动过滤并动态标注运营商
+# 只针对北京地区，通过测绘引擎进行宽泛搜索，靠主动流测活自动过滤并动态标注运营商
 HUNTER_QUERY = 'app.name="udpxy" && ip.city="北京市"'
+QUAKE_QUERY = 'app:"udpxy" AND city:"Beijing"'
 TEST_MULTICAST = "239.3.1.150:8000"  # 北京卫视组播
 
 # 待测试的联通核心频道列表（组播 IP 映射）
@@ -17,6 +19,48 @@ CHANNELS = {
     "kaku": {"name": "卡酷少儿", "multicast": "239.3.1.152:8000"},
 }
 # ============================================
+
+async def fetch_quake_nodes(key: str) -> List[Dict]:
+    """通过 360 Quake 开放接口抓取北京的 udpxy 节点（极其稳定，赠送免费 API 额度，支持海外 Actions 直接访问）"""
+    print("🔍 正在通过 360 Quake 接口检索北京 udpxy 节点...")
+    url = "https://quake.360.net/api/v3/search/quake_service"
+    headers = {
+        "X-QuakeToken": key,
+        "Content-Type": "application/json"
+    }
+    body = {
+        "query": QUAKE_QUERY,
+        "start": 0,
+        "size": 50
+    }
+    candidates = []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=body, timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if str(data.get("code")) == "0":
+                    results = data.get("data", []) or []
+                    for item in results:
+                        ip = item.get("ip")
+                        port = item.get("port")
+                        location = item.get("location", {}) or {}
+                        isp = location.get("isp") or item.get("org") or "未知运营商"
+                        if ip and port:
+                            candidates.append({
+                                "url": f"http://{ip}:{port}",
+                                "isp": isp
+                            })
+                    if candidates:
+                        print(f"✅ 360 Quake 检索成功！获取到 {len(candidates)} 个北京候选节点。")
+                        return candidates
+                else:
+                    print(f"⚠️ 360 Quake API 返回错误: {data.get('message')}")
+            else:
+                print(f"⚠️ 360 Quake API 状态码异常 {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"获取 360 Quake 数据出错: {e}")
+    return []
 
 async def fetch_hunter_nodes(key: str) -> List[Dict]:
     """通过 奇安信鹰图 (Hunter.how / Hunter.qianxin.com) 开放接口抓取北京的 udpxy 节点"""
@@ -31,11 +75,16 @@ async def fetch_hunter_nodes(key: str) -> List[Dict]:
         "https://hunter.qianxin.com/openApi/search"  # 奇安信国内站 (hunter.qianxin.com)
     ]
     
+    # 部分平台接口（如国际站）强制要求带上时间范围
+    today = datetime.date.today()
+    one_year_ago = today - datetime.timedelta(days=365)
+    start_time = one_year_ago.strftime("%Y-%m-%d")
+    end_time = today.strftime("%Y-%m-%d")
+    
     candidates = []
     
     for url in api_endpoints:
         print(f"📡 尝试请求接口: {url}")
-        # 奇安信国际站 (hunter.how) 接收的参数名为 "query"，国内站为 "search"
         query_param_name = "query" if "hunter.how" in url else "search"
         
         params = {
@@ -43,24 +92,23 @@ async def fetch_hunter_nodes(key: str) -> List[Dict]:
             query_param_name: search_val,
             "page": 1,
             "page_size": 50,
-            "is_web": 3
+            "is_web": 3,
+            "start_time": start_time,
+            "end_time": end_time
         }
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(url, params=params, timeout=10.0)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # 兼容国内站(code=200)和国际站(code=200)的响应格式
                     code = data.get("code")
                     if code == 200:
-                        # 兼容国际站的 data.list 和国内站的 data.arr
                         data_obj = data.get("data", {}) or {}
                         arr = data_obj.get("list", []) or data_obj.get("arr", []) or []
                         
                         for item in arr:
                             ip = item.get("ip")
                             port = item.get("port")
-                            # 提取运营商字段，优先 as_org 或 isp
                             isp = item.get("as_org", "") or item.get("isp", "") or "未知运营商"
                             if ip and port:
                                 candidates.append({
@@ -104,16 +152,22 @@ async def verify_node(candidate: Dict) -> Optional[Dict]:
     return None
 
 async def main():
-    # 动态检测奇安信鹰图的密钥环境变量
+    # 动态检测所有支持的测绘引擎密钥
+    quake_key = os.environ.get("QUAKE_KEY") or os.environ.get("QUAKE_TOKEN")
     hunter_key = os.environ.get("HUNTER_KEY") or os.environ.get("HUNTER_API_KEY")
-    if not hunter_key:
-        print("❌ 未检测到 HUNTER_KEY 或 HUNTER_API_KEY 环境变量！请在 GitHub Secrets 中配置。")
-        return
+    
+    candidates = []
+    
+    # 优先使用免费额度极高、且完全支持免费 API 调用的 360 Quake 引擎进行快速避险
+    if quake_key:
+        candidates = await fetch_quake_nodes(quake_key)
         
-    # 1. 抓取节点
-    candidates = await fetch_hunter_nodes(hunter_key)
+    # 如果 Quake 未配置或检索为空，则故障降级到奇安信鹰图接口
+    if not candidates and hunter_key:
+        candidates = await fetch_hunter_nodes(hunter_key)
+        
     if not candidates:
-        print("❌ 未从奇安信鹰图获取到任何可用北京 udpxy 候选节点。")
+        print("❌ 未检测到任何可用的测绘平台密钥（请在 Secrets 配置 QUAKE_KEY），或者平台检索失败。")
         return
         
     # 2. 并发测活

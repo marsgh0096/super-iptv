@@ -26,6 +26,7 @@ jobs:
     - name: 执行测活与过滤脚本
       env:
         HUNTER_KEY: ${{ secrets.HUNTER_KEY }}
+        QUAKE_KEY: ${{ secrets.QUAKE_KEY }}
       run: |
         python scripts/harvest.py
 

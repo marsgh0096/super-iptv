@@ -5,13 +5,8 @@ import base64
 from typing import List, Dict, Optional
 
 # ================= 配置区域 =================
-# 只针对北京地区，去除 ISP 限制以最大化获取候选，靠主动流测活自动筛选与标注运营商
-ZOOMEYE_QUERIES = [
-    'app:"udpxy" && city:"Beijing"',
-    'app:"udpxy" && subdivisions:"Beijing"',
-    'udpxy && city:"Beijing"',
-]
-
+# 针对北京地区，通过奇安信鹰图进行宽泛搜索，靠主动流测活自动过滤并动态标注运营商
+HUNTER_QUERY = 'app.name="udpxy" && ip.city="北京市"'
 TEST_MULTICAST = "239.3.1.150:8000"  # 北京卫视组播
 
 # 待测试的联通核心频道列表（组播 IP 映射）
@@ -23,126 +18,62 @@ CHANNELS = {
 }
 # ============================================
 
-async def fetch_fofa_nodes(key: str) -> List[Dict]:
-    """通过 FOFA 开放接口抓取北京的 udpxy 节点"""
-    print("🔍 正在通过 FOFA 接口检索北京 udpxy 节点...")
-    query = 'app="udpxy" && city="Beijing"'
-    qbase64 = base64.b64encode(query.encode('utf-8')).decode('utf-8')
-    url = "https://fofa.info/api/v1/search/all"
-    params = {
-        "key": key,
-        "qbase64": qbase64,
-        "fields": "ip,port,org",
-        "size": 50
-    }
-    candidates = []
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params, timeout=10.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("error") == False:
-                    results = data.get("results", []) or []
-                    for item in results:
-                        if len(item) >= 2:
-                            ip = item[0]
-                            port = item[1]
-                            isp = item[2] if len(item) > 2 else "未知运营商"
-                            candidates.append({
-                                "url": f"http://{ip}:{port}",
-                                "isp": isp
-                            })
-                    if candidates:
-                        print(f"✅ FOFA 检索成功！获取到 {len(candidates)} 个候选节点。")
-                        return candidates
-                else:
-                    print(f"⚠️ FOFA API 返回错误: {data.get('errmsg')}")
-            else:
-                print(f"⚠️ FOFA API 状态码异常 {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"获取 FOFA 数据出错: {e}")
-    return []
-
 async def fetch_hunter_nodes(key: str) -> List[Dict]:
-    """通过 奇安信鹰图 (Hunter) 开放接口抓取北京的 udpxy 节点"""
+    """通过 奇安信鹰图 (Hunter.how / Hunter.qianxin.com) 开放接口抓取北京的 udpxy 节点"""
     print("🔍 正在通过 奇安信鹰图 (Hunter) 接口检索北京 udpxy 节点...")
-    query = 'app.name="udpxy" && ip.city="北京市"'
-    search_val = base64.urlsafe_b64encode(query.encode('utf-8')).decode('utf-8')
-    url = "https://hunter.qianxin.com/openApi/search"
-    params = {
-        "api-key": key,
-        "search": search_val,
-        "page": 1,
-        "page_size": 50,
-        "is_web": 3
-    }
-    candidates = []
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params, timeout=10.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("code") == 200:
-                    arr = data.get("data", {}).get("arr", []) or []
-                    for item in arr:
-                        ip = item.get("ip")
-                        port = item.get("port")
-                        isp = item.get("as_org", "未知运营商")
-                        if ip and port:
-                            candidates.append({
-                                "url": f"http://{ip}:{port}",
-                                "isp": isp
-                            })
-                    if candidates:
-                        print(f"✅ Hunter 检索成功！获取到 {len(candidates)} 个候选节点。")
-                        return candidates
-                else:
-                    print(f"⚠️ Hunter API 返回错误: {data.get('message')}")
-            else:
-                print(f"⚠️ Hunter API 状态码异常 {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"获取 Hunter 数据出错: {e}")
-    return []
-
-async def fetch_zoomeye_nodes(api_key: str) -> List[Dict]:
-    """通过 ZoomEye 国际站接口抓取北京的 udpxy 节点"""
-    print("🔍 正在通过 ZoomEye 接口检索北京 udpxy 节点...")
-    headers = {"API-KEY": api_key, "User-Agent": "ZoomEye-Python-SDK"}
     
-    for query in ZOOMEYE_QUERIES:
-        print(f"🔍 正在尝试 ZoomEye 查询: {query}")
-        candidates = []
+    # URL 安全的 base64 编码
+    search_val = base64.urlsafe_b64encode(HUNTER_QUERY.encode('utf-8')).decode('utf-8')
+    
+    # 国际站与国内站做高容错请求支持
+    api_endpoints = [
+        "https://api.hunter.how/search",            # 奇安信国际站 (hunter.how)
+        "https://hunter.qianxin.com/openApi/search"  # 奇安信国内站 (hunter.qianxin.com)
+    ]
+    
+    candidates = []
+    
+    for url in api_endpoints:
+        print(f"📡 尝试请求接口: {url}")
+        params = {
+            "api-key": key,
+            "search": search_val,
+            "page": 1,
+            "page_size": 50,
+            "is_web": 3
+        }
         try:
             async with httpx.AsyncClient() as client:
-                url = "https://api.zoomeye.ai/host/search"
-                resp = await client.get(
-                    url, 
-                    headers=headers, 
-                    params={"query": query, "page": 1}, 
-                    timeout=10.0
-                )
+                resp = await client.get(url, params=params, timeout=10.0)
                 if resp.status_code == 200:
-                    matches = resp.json().get("matches", []) or []
-                    for match in matches:
-                        ip = match.get("ip")
-                        port = match.get("portinfo", {}).get("port")
-                        isp = match.get("geoinfo", {}).get("isp", "未知运营商")
-                        if ip and port:
-                            candidates.append({
-                                "url": f"http://{ip}:{port}",
-                                "isp": isp
-                            })
-                    if candidates:
-                        print(f"✅ ZoomEye 查询成功！获取到 {len(candidates)} 个北京候选节点。")
-                        return candidates
+                    data = resp.json()
+                    # 兼容国内站(code=200)和国际站(code=200)的响应格式
+                    code = data.get("code")
+                    if code == 200:
+                        # 兼容国际站的 data.list 和国内站的 data.arr
+                        data_obj = data.get("data", {}) or {}
+                        arr = data_obj.get("list", []) or data_obj.get("arr", []) or []
+                        
+                        for item in arr:
+                            ip = item.get("ip")
+                            port = item.get("port")
+                            # 提取运营商字段，优先 as_org 或 isp
+                            isp = item.get("as_org", "") or item.get("isp", "") or "未知运营商"
+                            if ip and port:
+                                candidates.append({
+                                    "url": f"http://{ip}:{port}",
+                                    "isp": isp
+                                })
+                        if candidates:
+                            print(f"✅ 鹰图接口检索成功！获取到 {len(candidates)} 个北京候选节点。")
+                            return candidates
                     else:
-                        print("⚠️ 该查询未返回任何节点，尝试下一个候选查询...")
+                        print(f"⚠️ 鹰图 API 返回非成功状态码 {code}: {data.get('message')}")
                 else:
-                    print(f"⚠️ ZoomEye API 返回状态码 {resp.status_code}: {resp.text}")
+                    print(f"⚠️ 鹰图 API 请求失败，HTTP 状态码: {resp.status_code}")
         except Exception as e:
-            print(f"获取 ZoomEye 数据出错: {e}")
+            print(f"请求鹰图接口 {url} 出错: {e}")
             
-    print("❌ 所有候选 ZoomEye 查询均未获取到任何北京节点。")
     return []
 
 async def verify_node(candidate: Dict) -> Optional[Dict]:
@@ -170,29 +101,20 @@ async def verify_node(candidate: Dict) -> Optional[Dict]:
     return None
 
 async def main():
-    # 动态检测所有支持的测绘引擎密钥
-    fofa_key = os.environ.get("FOFA_KEY")
+    # 动态检测奇安信鹰图的密钥环境变量
     hunter_key = os.environ.get("HUNTER_KEY") or os.environ.get("HUNTER_API_KEY")
-    zoomeye_key = os.environ.get("ZOOMEYE_KEY")
-    
-    candidates = []
-    
-    # 按照优先级：FOFA -> Hunter -> ZoomEye 进行故障转移与避险尝试
-    if fofa_key:
-        candidates = await fetch_fofa_nodes(fofa_key)
+    if not hunter_key:
+        print("❌ 未检测到 HUNTER_KEY 或 HUNTER_API_KEY 环境变量！请在 GitHub Secrets 中配置。")
+        return
         
-    if not candidates and hunter_key:
-        candidates = await fetch_hunter_nodes(hunter_key)
-        
-    if not candidates and zoomeye_key:
-        candidates = await fetch_zoomeye_nodes(zoomeye_key)
-        
+    # 1. 抓取节点
+    candidates = await fetch_hunter_nodes(hunter_key)
     if not candidates:
-        print("❌ 未检测到任何可用的测绘平台密钥，或者所有已配置的平台均检索失败（可能是额度用尽）。")
+        print("❌ 未从奇安信鹰图获取到任何可用北京 udpxy 候选节点。")
         return
         
     # 2. 并发测活
-    print(f"🔄 正在对 {len(candidates)} 个北京候选节点进行多线程高并发流连通性与负载测试...")
+    print(f"🔄 正在对 {len(candidates)} 个北京候选节点进行并发连通性与负载测试...")
     tasks = [verify_node(cand) for cand in candidates]
     results = await asyncio.gather(*tasks)
     healthy = [r for r in results if r is not None]
@@ -201,7 +123,7 @@ async def main():
         print("❌ 没有找到任何可通过北京卫视组播流验证的健康公网节点。")
         return
         
-    # 按连接负载升序排序
+    # 按连接负载（连接数）升序排序，选择最空闲的节点
     healthy.sort(key=lambda x: x["connections"])
     best_node = healthy[0]["node"]
     best_isp = healthy[0]["isp"]

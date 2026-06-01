@@ -138,15 +138,20 @@ async def verify_node(candidate: Dict) -> Optional[Dict]:
             if r.status_code == 200 and "udpxy status" in r.text.lower():
                 active = r.text.count("<td>[")  # 统计已有的活跃连接数
                 
-                # 拿北京卫视组播测试该节点连通性
-                stream_url = f"{node_url}/udp/{TEST_MULTICAST}"
-                async with client.stream("GET", stream_url, headers=headers, timeout=2.5) as stream_resp:
-                    if stream_resp.status_code == 200:
-                        return {
-                            "node": node_url, 
-                            "connections": active, 
-                            "isp": isp
-                        }
+                # 自适应检测 /rtp/ (国内 IPTV 组播主力协议) 和 /udp/ (少数裸组播)
+                for proto in ["rtp", "udp"]:
+                    stream_url = f"{node_url}/{proto}/{TEST_MULTICAST}"
+                    try:
+                        async with client.stream("GET", stream_url, headers=headers, timeout=2.5) as stream_resp:
+                            if stream_resp.status_code == 200:
+                                return {
+                                    "node": node_url, 
+                                    "connections": active, 
+                                    "isp": isp,
+                                    "proto": proto
+                                }
+                    except Exception:
+                        continue
     except Exception:
         pass
     return None
@@ -184,13 +189,14 @@ async def main():
     healthy.sort(key=lambda x: x["connections"])
     best_node = healthy[0]["node"]
     best_isp = healthy[0]["isp"]
-    print(f"🌟 本轮最空闲的健康节点: {best_node}，运营商: {best_isp}，可用健康节点共 {len(healthy)} 个。")
+    best_proto = healthy[0].get("proto", "rtp")
+    print(f"🌟 本轮最空闲的健康节点: {best_node}，运营商: {best_isp}，协议前缀: {best_proto}，可用健康节点共 {len(healthy)} 个。")
     
     # 3. 编译并输出为标准的播放列表文件 playlist.m3u
     m3u_lines = ["#EXTM3U"]
     for ch_id, ch_meta in CHANNELS.items():
-        # 拼接出直连最优节点的 M3U 单播流链接
-        play_url = f"{best_node}/udp/{ch_meta['multicast']}"
+        # 拼接出直连最优节点的 M3U 单播流链接 (自动使用测活成功的协议前缀 rtp 或 udp)
+        play_url = f"{best_node}/{best_proto}/{ch_meta['multicast']}"
         # 在分组名和频道名中动态标注出具体的运营商
         m3u_lines.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="" group-title="北京专网台 ({best_isp})",{ch_meta["name"]} ({best_isp})')
         m3u_lines.append(play_url)

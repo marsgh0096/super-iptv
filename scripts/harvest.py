@@ -35,9 +35,12 @@ async def fetch_hunter_nodes(key: str) -> List[Dict]:
     
     for url in api_endpoints:
         print(f"📡 尝试请求接口: {url}")
+        # 奇安信国际站 (hunter.how) 接收的参数名为 "query"，国内站为 "search"
+        query_param_name = "query" if "hunter.how" in url else "search"
+        
         params = {
             "api-key": key,
-            "search": search_val,
+            query_param_name: search_val,
             "page": 1,
             "page_size": 50,
             "is_web": 3

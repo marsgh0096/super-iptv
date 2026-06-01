@@ -137,21 +137,11 @@ async def verify_node(candidate: Dict) -> Optional[Dict]:
             r = await client.get(status_url, headers=headers, timeout=2.0)
             if r.status_code == 200 and "udpxy status" in r.text.lower():
                 active = r.text.count("<td>[")  # 统计已有的活跃连接数
-                
-                # 自适应检测 /rtp/ (国内 IPTV 组播主力协议) 和 /udp/ (少数裸组播)
-                for proto in ["rtp", "udp"]:
-                    stream_url = f"{node_url}/{proto}/{TEST_MULTICAST}"
-                    try:
-                        async with client.stream("GET", stream_url, headers=headers, timeout=2.5) as stream_resp:
-                            if stream_resp.status_code == 200:
-                                return {
-                                    "node": node_url, 
-                                    "connections": active, 
-                                    "isp": isp,
-                                    "proto": proto
-                                }
-                    except Exception:
-                        continue
+                return {
+                    "node": node_url, 
+                    "connections": active, 
+                    "isp": isp
+                }
     except Exception:
         pass
     return None
@@ -182,22 +172,25 @@ async def main():
     healthy = [r for r in results if r is not None]
     
     if not healthy:
-        print("❌ 没有找到任何可通过北京卫视组播流验证的健康公网节点。")
+        print("❌ 没有找到任何可用的健康北京公网 udpxy 节点。")
         return
         
-    # 按连接负载（连接数）升序排序，选择最空闲的节点
+    # 按连接负载（已连接用户数）升序排序，选择当前负载最低的空闲节点
     healthy.sort(key=lambda x: x["connections"])
+    
+    print(f"\n📋 本轮扫描成功！共发现 {len(healthy)} 个健康的北京 udpxy 节点：")
+    for idx, item in enumerate(healthy[:10]):
+        print(f"  [{idx+1}] {item['node']}  (当前连接数: {item['connections']} | 运营商: {item['isp']})")
+        
     best_node = healthy[0]["node"]
     best_isp = healthy[0]["isp"]
-    best_proto = healthy[0].get("proto", "rtp")
-    print(f"🌟 本轮最空闲的健康节点: {best_node}，运营商: {best_isp}，协议前缀: {best_proto}，可用健康节点共 {len(healthy)} 个。")
+    print(f"\n🌟 选择本轮最优最空闲的节点: {best_node} (运营商: {best_isp}) 编译播放列表。")
     
     # 3. 编译并输出为标准的播放列表文件 playlist.m3u
     m3u_lines = ["#EXTM3U"]
     for ch_id, ch_meta in CHANNELS.items():
-        # 拼接出直连最优节点的 M3U 单播流链接 (自动使用测活成功的协议前缀 rtp 或 udp)
-        play_url = f"{best_node}/{best_proto}/{ch_meta['multicast']}"
-        # 在分组名和频道名中动态标注出具体的运营商
+        # 北京联通等国内 IPTV 专网组播数据包是 RTP 格式，udpxy 转换必须使用 /rtp/ 路径！
+        play_url = f"{best_node}/rtp/{ch_meta['multicast']}"
         m3u_lines.append(f'#EXTINF:-1 tvg-id="{ch_id}" tvg-logo="" group-title="北京专网台 ({best_isp})",{ch_meta["name"]} ({best_isp})')
         m3u_lines.append(play_url)
         
